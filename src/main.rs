@@ -1,5 +1,34 @@
+use bytes::Bytes;
 use mini_redis::{Connection, Frame};
+// use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+// use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
+
+// const MAX_SHARDS: usize = 10;
+type Db = Arc<Mutex<HashMap<String, Bytes>>>;
+// type ShardedDb = Arc<Vec<Mutex<HashMap<String, Bytes>>>>;
+
+// fn new_sharded_db(num_shards: usize) -> ShardedDb {
+//     let mut db = Vec::with_capacity(num_shards);
+//     for _ in 0..num_shards {
+//         db.push(Mutex::new(HashMap::new()));
+//     }
+//     Arc::new(db)
+// }
+
+// fn calculate_hash<T: Hash>(t: &T) -> u64 {
+//     let mut s = DefaultHasher::new();
+//     t.hash(&mut s);
+//     s.finish()
+// }
+
+// fn calculate_shard_index(t:String, db_len: usize)->usize{
+//     let mut ret: u64 = calculate_hash(&t);
+//     ret =  ret % db_len.into();
+//     ret.try_into().unwrap()
+// }
 
 /// A TCP server listens for connections on a port by keeping track of a bunch of sockets.
 /// When  a socket is flagged, a client has arrived for connection, then we move onto handshaking with them
@@ -10,45 +39,42 @@ use tokio::net::{TcpListener, TcpStream};
 /// 4. accept connection and process it
 #[tokio::main]
 async fn main() {
-    // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
+    println!("Listening");
+
+    // let db: Db = Arc::new(Mutex::new(HashMap::new()));
+    let db = Db::default();
+
     loop {
-        // The second item contains the IP and port of the new connection in a socket
         let (socket, _) = listener.accept().await.unwrap();
-        // A new task is spawned for each inbound socket. The socket is
-        // moved to the new task and processed there.
+        // Clone the handle to the hash map.
+        let db = db.clone();
+
+        println!("Accepted");
         tokio::spawn(async move {
-            process(socket).await;
+            process(socket, db).await;
         });
     }
 }
-
-async fn process(socket: TcpStream) {
+async fn process(socket: TcpStream, db: Db) {
     use mini_redis::Command::{self, Get, Set};
-    use std::collections::HashMap;
-
-    // A hashmap is used to store data
-    let mut db = HashMap::new();
 
     // Connection, provided by `mini-redis`, handles parsing frames from
     // the socket
     let mut connection = Connection::new(socket);
 
-    // Use `read_frame` to receive a command from the connection.
     while let Some(frame) = connection.read_frame().await.unwrap() {
         let response = match Command::from_frame(frame).unwrap() {
             Set(cmd) => {
-                // The value is stored as `Vec<u8>`
-                db.insert(cmd.key().to_string(), cmd.value().to_vec());
+                let mut db = db.lock().unwrap();
+                db.insert(cmd.key().to_string(), cmd.value().clone());
                 Frame::Simple("OK".to_string())
             }
             Get(cmd) => {
+                let db = db.lock().unwrap();
                 if let Some(value) = db.get(cmd.key()) {
-                    // `Frame::Bulk` expects data to be of type `Bytes`. This
-                    // type will be covered later in the tutorial. For now,
-                    // `&Vec<u8>` is converted to `Bytes` using `into()`.
-                    Frame::Bulk(value.clone().into())
+                    Frame::Bulk(value.clone())
                 } else {
                     Frame::Null
                 }
